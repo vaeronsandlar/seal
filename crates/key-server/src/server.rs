@@ -1,7 +1,9 @@
 // Copyright (c), Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 use crate::errors::InternalError::{DeprecatedSDKVersion, InvalidSDKVersion};
-use crate::externals::{current_epoch_time, duration_since, get_reference_gas_price};
+use crate::externals::{
+    current_epoch_time, duration_since, get_reference_gas_price, resolve_mvr_name,
+};
 use crate::metrics::{call_with_duration, observation_callback, status_callback, Metrics};
 use crate::signed_message::{signed_message, signed_request};
 use crate::types::MasterKeyPOP;
@@ -106,6 +108,10 @@ struct FetchKeyRequest {
     enc_verification_key: ElgamalVerificationKey,
     request_signature: Ed25519Signature,
 
+    // Optional MVR name. If given and it resolves to the package from the ptb, this is the name
+    // used in the signed message.
+    mvr: Option<String>,
+
     certificate: Certificate,
 }
 
@@ -178,6 +184,7 @@ impl Server {
         session_sig: &Ed25519Signature,
         cert: &Certificate,
         req_id: Option<&str>,
+        mvr_name: Option<String>,
     ) -> Result<(), InternalError> {
         // Check certificate.
         if cert.ttl_min > SESSION_KEY_TTL_MAX
@@ -192,7 +199,13 @@ impl Server {
             return Err(InternalError::InvalidCertificate);
         }
 
-        let msg = signed_message(pkg_id, &cert.session_vk, cert.creation_time, cert.ttl_min);
+        let msg = signed_message(
+            pkg_id,
+            mvr_name,
+            &cert.session_vk,
+            cert.creation_time,
+            cert.ttl_min,
+        );
         debug!(
             "Checking signature on message: {:?} (req_id: {:?})",
             msg, req_id
@@ -297,6 +310,7 @@ impl Server {
         gas_price: u64,
         metrics: Option<&Metrics>,
         req_id: Option<&str>,
+        mvr_name: Option<String>,
     ) -> Result<Vec<KeyId>, InternalError> {
         debug!(
             "Checking request for ptb_str: {:?}, cert {:?} (req_id: {:?})",
@@ -331,6 +345,13 @@ impl Server {
             return Err(InternalError::OldPackageVersion);
         }
 
+        if let Some(name) = &mvr_name {
+            let mvr_package_id = resolve_mvr_name(&self.network, name).await?;
+            if mvr_package_id != last_pkg_id {
+                return Err(InternalError::InvalidPackage);
+            }
+        }
+
         // Check all conditions
         self.check_signature(
             &first_pkg_id,
@@ -340,6 +361,7 @@ impl Server {
             request_signature,
             certificate,
             req_id,
+            mvr_name,
         )
         .await?;
 
@@ -508,6 +530,7 @@ async fn handle_fetch_key(
             app_state.reference_gas_price(),
             Some(&app_state.metrics),
             req_id,
+            payload.mvr,
         )
         .await
         .map(|full_id| Json(app_state.server.create_response(&full_id, &payload.enc_key)))
