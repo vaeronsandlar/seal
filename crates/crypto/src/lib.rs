@@ -211,6 +211,16 @@ pub fn seal_decrypt(
         combine(&shares)?
     };
 
+    // Verify nonce
+    let randomness_key = derive_key(
+        KeyPurpose::EncryptedRandomness,
+        &base_key,
+        encrypted_shares.ciphertexts(),
+        *threshold,
+        &services.iter().map(|(id, _)| *id).collect_vec(),
+    );
+    encrypted_shares.verify_nonce(&randomness_key)?;
+
     // Derive symmetric key and decrypt the ciphertext
     let dem_key = derive_key(
         KeyPurpose::DEM,
@@ -301,6 +311,14 @@ impl IBEEncryptions {
         Ok(base_key)
     }
 
+    fn verify_nonce(&self, randomness_key: &[u8; KEY_SIZE]) -> FastCryptoResult<()> {
+        match self {
+            IBEEncryptions::BonehFranklinBLS12381 { nonce, encrypted_randomness, .. } => {
+                ibe::decrypt_and_verify_nonce(encrypted_randomness, randomness_key, nonce).map(|_| ())
+            }
+        }
+    }
+
     /// Given the derived key, decrypt all shares
     fn decrypt_all_shares(
         &self,
@@ -371,7 +389,7 @@ impl IBEEncryptions {
                 IBEEncryptions::BonehFranklinBLS12381 {
                     nonce,
                     encrypted_shares,
-                    ..
+                    encrypted_randomness,
                 },
                 IBEUserSecretKeys::BonehFranklinBLS12381(user_secret_keys),
             ) => {
@@ -457,6 +475,8 @@ impl IBEPublicKeys {
         }
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
